@@ -1,4 +1,4 @@
-module algorand.com/sumhash
+module github.com/algonathan/sumhash
 
 go 1.16
 
