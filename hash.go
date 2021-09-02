@@ -8,50 +8,49 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Matrix is the NxM matrix A with elements in Z_q where q=2^64
+// Matrix is the n×m sumhash matrix A with elements in Z_q where q=2^64
 type Matrix [][]uint64
 
 // LookupTable is the precomputed sums from a matrix for every possible byte of input.
-// Its dimensions are [N][M/8][256]uint64.
+// Its dimensions are [n][m/8][256]uint64.
 type LookupTable [][][256]uint64
 
-func RandomMatrix(rand io.Reader, N int, compressionFactor int) Matrix {
-	M := compressionFactor * N * 64 // bits
-	A := make([][]uint64, N)
+// RandomMatrix generates a random sumhash matrix by reading from rand.
+// n is the number of rows in the matrix and m is the number of bits in the input message.
+func RandomMatrix(rand io.Reader, n int, m int) (Matrix, error) {
+	A := make([][]uint64, n)
 	w := make([]byte, 8)
 	for i := range A {
-		A[i] = make([]uint64, M)
+		A[i] = make([]uint64, m)
 		for j := range A[i] {
 			_, err := rand.Read(w)
 			if err != nil {
-				panic(err)
+				return nil, err
 			}
 			A[i][j] = binary.LittleEndian.Uint64(w)
 		}
 	}
-	return A
+	return A, nil
 }
 
-func RandomMatrixFromSeed(seed []byte, N int, compressionFactor int) Matrix {
-	M := compressionFactor * N * 64 // bits
-
+func RandomMatrixFromSeed(seed []byte, n int, m int) (Matrix, error) {
 	xof := sha3.NewShake256()
 	binary.Write(xof, binary.LittleEndian, uint16(64)) // u=64
-	binary.Write(xof, binary.LittleEndian, uint16(N))
-	binary.Write(xof, binary.LittleEndian, uint16(M))
+	binary.Write(xof, binary.LittleEndian, uint16(n))
+	binary.Write(xof, binary.LittleEndian, uint16(m))
 	xof.Write(seed)
 
-	return RandomMatrix(xof, N, compressionFactor)
+	return RandomMatrix(xof, n, m)
 }
 
 func (A Matrix) LookupTable() LookupTable {
-	N := len(A)
-	M := len(A[0])
-	At := make(LookupTable, N)
+	n := len(A)
+	m := len(A[0])
+	At := make(LookupTable, n)
 	for i := range A {
-		At[i] = make([][256]uint64, M/8)
+		At[i] = make([][256]uint64, m/8)
 
-		for j := 0; j < M; j += 8 {
+		for j := 0; j < m; j += 8 {
 			for b := 0; b < 256; b++ {
 				At[i][j/8][b] = sumBits(A[i][j:j+8], byte(b))
 			}
@@ -150,6 +149,10 @@ func (d *digest) BlockSize() int { return d.blockSize }
 
 func (d *digest) Write(p []byte) (nn int, err error) {
 	nn = len(p)
+	// Check if the new length (in bits) overflows.
+	if uint64(nn) >= (1<<61)-d.len {
+		panic("digest length overflows")
+	}
 	d.len += uint64(nn)
 	if d.nx > 0 {
 		n := copy(d.x[d.nx:], p)
@@ -196,6 +199,8 @@ func (d *digest) Sum(in []byte) []byte {
 func (d *digest) checkSum() []byte {
 	var B uint64 = uint64(d.blockSize)
 	var P uint64 = B - 16
+
+	len := d.len << 3
 	// Padding. Add a 1 bit and 0 bits until P bytes mod B.
 	tmp := make([]byte, B)
 	tmp[0] = 0x80
@@ -206,7 +211,6 @@ func (d *digest) checkSum() []byte {
 	}
 
 	// Length in bits. Note: sumhash uses 128 bits to represent the length.
-	len := d.len << 3
 	binary.LittleEndian.PutUint64(tmp[0:], len)
 	binary.LittleEndian.PutUint64(tmp[8:], 0) // upper 64 bits are always zero, because len variable has type uint64
 	d.Write(tmp[0:16])
